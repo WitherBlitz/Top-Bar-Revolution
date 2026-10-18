@@ -1,0 +1,6 @@
+build/
+dist/
+extension/bin/
+watch/*.exe
+__pycache__/
+*.pyc
