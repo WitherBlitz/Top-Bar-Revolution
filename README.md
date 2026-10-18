@@ -20,7 +20,8 @@ plugs into TopBar through its `extensions` folder, a settings app, and an instal
   Choose per part what to show (PC name, bar, VRAM), and click a network PC's pill to see its top processes.
 - **Wake-on-LAN**: a PC that's off turns into a ⏻ button on the bar; click it (or right-click the bar →
   *Wake up*) to wake it.
-- **Monitor watcher**: restarts TopBar after a display change so it stays docked at the top.
+- **Stays at the top**: the bar is kept pinned to the primary monitor's top edge through monitor
+  changes, sleep and DPI switches, and a monitor watcher restarts TopBar after a display change.
 
 ## Install
 

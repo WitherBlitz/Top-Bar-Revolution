@@ -471,6 +471,7 @@ namespace TopBarExtras
                 double h = Math.Max(16, Math.Min(48, Num(x, "height", StockHeight)));
                 ApplyFont(x["font"] as JObject);
                 ApplyHeight(h);
+                StartDocking();
                 ApplyBackdrop(st, x["backdrop"] as JObject);
                 ApplyLayout(x, h);
                 ApplyTitle(st, x["title"] as JObject, h);
@@ -531,37 +532,108 @@ namespace TopBarExtras
             if (h > StockHeight) Set(t, FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
         }
 
-        // TopBar reserves an 18px strip in Build(); resize the window and
-        // re-reserve the strip for the same appbar handle.
         private static void ApplyHeight(double h)
         {
-            if (Math.Abs(win.Height - h) < 0.5 && Math.Abs(reservedHeight - h) < 0.5) return;
-            IntPtr hwnd = new WindowInteropHelper(win).Handle;
-            PresentationSource src = PresentationSource.FromVisual(win);
-            double sy = src != null && src.CompositionTarget != null
-                ? src.CompositionTarget.TransformToDevice.M22 : 1.0;
+            barHeight = h;
+            Dock(true);
+        }
 
-            RECT wr;
-            GetWindowRect(hwnd, out wr);
+        // -- staying at the top ------------------------------------------------
+        //
+        // TopBar places itself once, when it starts, at the top of the primary
+        // screen's *work area*. After a monitor change that work area can still
+        // leave out TopBar's own old strip, so it lands a strip too low; and if
+        // Windows moves the window while a monitor goes away (or onto a phantom
+        // display above the screen), nothing ever puts it back. So the engine
+        // keeps it pinned to the primary monitor's real top edge: on every
+        // display, DPI and work-area change, and on a slow timer besides.
+
+        private static double barHeight = StockHeight;
+        private static DispatcherTimer keeper;
+        private static bool hooked;
+
+        private static void StartDocking()
+        {
+            IntPtr hwnd = new WindowInteropHelper(win).Handle;
+            if (!hooked && hwnd != IntPtr.Zero)
+            {
+                HwndSource source = HwndSource.FromHwnd(hwnd);
+                if (source != null)
+                {
+                    source.AddHook(DisplayHook);
+                    hooked = true;
+                }
+            }
+            if (keeper == null)
+            {
+                keeper = new DispatcherTimer(DispatcherPriority.Background, win.Dispatcher);
+                keeper.Interval = TimeSpan.FromSeconds(3);
+                keeper.Tick += delegate { Dock(false); };
+                keeper.Start();
+            }
+        }
+
+        private static IntPtr DisplayHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+        {
+            const int WM_DISPLAYCHANGE = 0x007E, WM_DPICHANGED = 0x02E0, WM_SETTINGCHANGE = 0x001A;
+            const int SPI_SETWORKAREA = 0x002F;
+            if (msg == WM_DISPLAYCHANGE || msg == WM_DPICHANGED
+                || (msg == WM_SETTINGCHANGE && wParam.ToInt64() == SPI_SETWORKAREA))
+            {
+                // Monitors settle over a second or two; look again as they do.
+                Later(400, delegate { Dock(false); });
+                Later(2500, delegate { Dock(false); });
+            }
+            return IntPtr.Zero;
+        }
+
+        // force: re-reserve the strip even when the window is already in place
+        // (a new height).
+        private static void Dock(bool force)
+        {
+            if (win == null) return;
+            IntPtr hwnd = new WindowInteropHelper(win).Handle;
+            if (hwnd == IntPtr.Zero) return;
+            // TopBar hides itself while a fullscreen app is in front - leave that be.
+            FieldInfo hidden = win.GetType().GetField("isHidden", Any);
+            if (!win.IsVisible || (hidden != null && (bool)hidden.GetValue(win))) return;
+            PresentationSource src = PresentationSource.FromVisual(win);
+            if (src == null || src.CompositionTarget == null) return;
+            Matrix toDevice = src.CompositionTarget.TransformToDevice;
+
+            MONITORINFO mi = new MONITORINFO();
+            mi.cbSize = Marshal.SizeOf(typeof(MONITORINFO));
+            POINT origin = new POINT();
+            if (!GetMonitorInfo(MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY), ref mi)) return;
+            RECT want = mi.rcMonitor;
+            want.bottom = want.top + (int)Math.Round(barHeight * toDevice.M22);
+
+            RECT have;
+            GetWindowRect(hwnd, out have);
+            bool placed = Math.Abs(have.left - want.left) <= 1 && Math.Abs(have.top - want.top) <= 1
+                       && Math.Abs(have.right - want.right) <= 1 && Math.Abs(have.bottom - want.bottom) <= 1;
+            if (placed && !force) return;
+
+            // Re-reserve the strip at the very top. Build() registers it under
+            // its private `handle` field, which it never fills in - so TopBar's
+            // appbar is keyed to a null hwnd, and that's the key to use.
             APPBARDATA abd = new APPBARDATA();
             abd.cbSize = Marshal.SizeOf(typeof(APPBARDATA));
-            // Build() registers the strip under its private `handle` field,
-            // which it never fills in - so TopBar's appbar is keyed to a null
-            // hwnd. Resizing it means using that same key.
             FieldInfo hf = win.GetType().GetField("handle", Any);
             abd.hWnd = hf != null ? (IntPtr)hf.GetValue(win) : hwnd;
             abd.uEdge = ABE_TOP;
-            abd.rc.left = wr.left;
-            abd.rc.right = wr.right;
-            abd.rc.top = wr.top < 0 ? 0 : wr.top;
-            abd.rc.bottom = abd.rc.top + (int)Math.Round(h * sy);
-            SHAppBarMessage(ABM_QUERYPOS, ref abd);
-            abd.rc.bottom = abd.rc.top + (int)Math.Round(h * sy);
+            abd.rc = want;
             SHAppBarMessage(ABM_SETPOS, ref abd);
 
-            win.Top = abd.rc.top / sy;
-            win.Height = h;
-            reservedHeight = h;
+            win.Left = want.left / toDevice.M11;
+            win.Top = want.top / toDevice.M22;
+            win.Width = (want.right - want.left) / toDevice.M11;
+            win.Height = barHeight;
+            reservedHeight = barHeight;
+            if (!placed)
+                Log(string.Format("docked: was {0},{1} {2}x{3}, now {4},{5} {6}x{7}",
+                    have.left, have.top, have.right - have.left, have.bottom - have.top,
+                    want.left, want.top, want.right - want.left, want.bottom - want.top));
         }
 
         private static void ApplyBackdrop(JObject st, JObject bd)
@@ -1201,6 +1273,26 @@ namespace TopBarExtras
 
         [DllImport("user32.dll")]
         private static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
+
+        private const uint MONITOR_DEFAULTTOPRIMARY = 1;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct POINT { public int x, y; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MONITORINFO
+        {
+            public int cbSize;
+            public RECT rcMonitor;
+            public RECT rcWork;
+            public uint dwFlags;
+        }
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr MonitorFromPoint(POINT pt, uint flags);
+
+        [DllImport("user32.dll")]
+        private static extern bool GetMonitorInfo(IntPtr monitor, ref MONITORINFO info);
 
         [DllImport("shell32.dll")]
         private static extern UIntPtr SHAppBarMessage(uint msg, ref APPBARDATA data);
