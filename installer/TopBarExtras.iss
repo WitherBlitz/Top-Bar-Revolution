@@ -18,7 +18,7 @@
 ; Build: build.cmd in this folder (builds the payloads, then runs ISCC).
 
 #define AppName "TopBar Extras"
-#define AppVersion "1.5.1"
+#define AppVersion "1.5.2"
 #define SettingsExe "TopBar Settings.exe"
 #define WatchExe "TopBarDisplayWatch.exe"
 #define TopBarDir GetEnv("APPDATA") + "\TopBar"

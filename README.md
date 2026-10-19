@@ -22,6 +22,7 @@ plugs into TopBar through its `extensions` folder, a settings app, and an instal
   *Wake up*) to wake it.
 - **Stays at the top**: the bar is kept pinned to the primary monitor's top edge through monitor
   changes, sleep and DPI switches, and a monitor watcher restarts TopBar after a display change.
+- **Follows Explorer**: when Explorer closes, TopBar closes with it; when Explorer restarts, so does TopBar.
 
 ## Install
 

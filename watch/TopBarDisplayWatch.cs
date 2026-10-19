@@ -1,4 +1,5 @@
-// TopBarDisplayWatch - restarts TopBar after the monitor layout changes.
+// TopBarDisplayWatch - restarts TopBar after the monitor layout changes, and
+// closes / reopens it along with Explorer.
 //
 // TopBar positions itself and registers its appbar exactly once, in Build(),
 // from Screen.PrimaryScreen.WorkingArea. It never listens for display changes
@@ -12,6 +13,12 @@
 // - Holds off while a fullscreen app or game has the foreground, so a game
 //   switching resolution doesn't get TopBar relaunched underneath it.
 // - Leaves TopBar alone if it isn't running: that was a deliberate close.
+// - Follows Explorer: when the taskbar (Shell_TrayWnd) goes away, TopBar is
+//   closed with it; when Explorer brings a taskbar back - a restart, or a crash
+//   and recovery - TopBar is started again once the shell has settled. Windows
+//   broadcasts "TaskbarCreated" to every top-level window when that happens,
+//   which also catches a restart too quick for the once-a-second check. Only a
+//   TopBar that was running gets reopened.
 // - Logs to %AppData%\TopBar\display-watch.log.
 
 using System;
@@ -56,6 +63,20 @@ namespace TopBarExtras
         [DllImport("shell32.dll")]
         private static extern int SHQueryUserNotificationState(out int state);
 
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern IntPtr FindWindow(string cls, string title);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int RegisterWindowMessage(string name);
+
+        private const int ShellSettleMs = 2500;
+        private readonly int WM_TASKBARCREATED = RegisterWindowMessage("TaskbarCreated");
+        private readonly System.Windows.Forms.Timer shellPoll = new System.Windows.Forms.Timer();
+        private readonly System.Windows.Forms.Timer shellSettle = new System.Windows.Forms.Timer();
+        private bool shellUp = true;
+        private bool closedForShell;     // TopBar was closed because Explorer went away
+        private bool restartForShell;    // Explorer came back while TopBar kept running
+
         private readonly System.Windows.Forms.Timer settle =
             new System.Windows.Forms.Timer();
         private readonly string topBarDir;
@@ -69,16 +90,27 @@ namespace TopBarExtras
             logPath = Path.Combine(topBarDir, "display-watch.log");
 
             settle.Tick += OnSettled;
+            shellUp = ShellRunning();
+            shellPoll.Interval = 1000;
+            shellPoll.Tick += delegate { CheckShell(); };
+            shellPoll.Start();
+            shellSettle.Interval = ShellSettleMs;
+            shellSettle.Tick += delegate { shellSettle.Stop(); ShellBack(); };
 
             CreateParams cp = new CreateParams();
             cp.Caption = "TopBarDisplayWatch";
             CreateHandle(cp);
-            Log("watching for display changes (" + Layout() + ")");
+            Log("watching for display changes and Explorer (" + Layout() + ")");
         }
 
         protected override void WndProc(ref Message m)
         {
-            if (m.Msg == WM_DISPLAYCHANGE)
+            if (m.Msg == WM_TASKBARCREATED && WM_TASKBARCREATED != 0)
+            {
+                Log("Explorer made a new taskbar");
+                ExplorerStarted();
+            }
+            else if (m.Msg == WM_DISPLAYCHANGE)
             {
                 long lp = m.LParam.ToInt64();
                 Log(string.Format("WM_DISPLAYCHANGE {0}x{1} - waiting {2} ms "
@@ -107,6 +139,81 @@ namespace TopBarExtras
             RestartTopBar();
         }
 
+        // -- following Explorer ----------------------------------------------
+
+        private static bool ShellRunning()
+        {
+            return FindWindow("Shell_TrayWnd", null) != IntPtr.Zero;
+        }
+
+        private void CheckShell()
+        {
+            bool up = ShellRunning();
+            if (up == shellUp) return;
+            shellUp = up;
+            if (!up) ExplorerStopped();
+            else ExplorerStarted();
+        }
+
+        private void ExplorerStopped()
+        {
+            shellSettle.Stop();
+            Process[] running = Process.GetProcessesByName("TopBar");
+            if (running.Length == 0)
+            {
+                Log("Explorer closed - TopBar isn't running");
+                return;
+            }
+            Log("Explorer closed - closing TopBar with it");
+            foreach (Process p in running) Stop(p);
+            closedForShell = true;
+        }
+
+        // Called for the poll seeing the taskbar return and for TaskbarCreated -
+        // both usually fire for one restart, so they share one settle timer.
+        private void ExplorerStarted()
+        {
+            shellUp = true;
+            if (!closedForShell && Process.GetProcessesByName("TopBar").Length > 0)
+                restartForShell = true;      // too quick to have been closed first
+            shellSettle.Stop();
+            shellSettle.Start();
+        }
+
+        private void ShellBack()
+        {
+            if (!ShellRunning()) return;     // it went away again; the poll will see it
+            if (closedForShell)
+            {
+                closedForShell = false;
+                restartForShell = false;
+                StartTopBar(null, "Explorer is back - reopened TopBar");
+            }
+            else if (restartForShell)
+            {
+                restartForShell = false;
+                Log("Explorer restarted under a running TopBar - restarting it");
+                RestartTopBar();
+            }
+        }
+
+        private void StartTopBar(string exe, string why)
+        {
+            if (exe == null || !File.Exists(exe)) exe = Path.Combine(topBarDir, "TopBar.exe");
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo(exe);
+                psi.WorkingDirectory = Path.GetDirectoryName(exe);
+                psi.UseShellExecute = true;
+                Process.Start(psi);
+                Log(why);
+            }
+            catch (Exception ex)
+            {
+                Log("couldn't start TopBar: " + ex.Message);
+            }
+        }
+
         private static bool FullscreenInForeground()
         {
             int state;
@@ -131,21 +238,7 @@ namespace TopBarExtras
                 catch (Exception) { }
                 Stop(p);
             }
-            if (exe == null || !File.Exists(exe))
-                exe = Path.Combine(topBarDir, "TopBar.exe");
-
-            try
-            {
-                ProcessStartInfo psi = new ProcessStartInfo(exe);
-                psi.WorkingDirectory = Path.GetDirectoryName(exe);
-                psi.UseShellExecute = true;
-                Process.Start(psi);
-                Log("restarted TopBar for layout " + Layout());
-            }
-            catch (Exception ex)
-            {
-                Log("couldn't start TopBar: " + ex.Message);
-            }
+            StartTopBar(exe, "restarted TopBar for layout " + Layout());
         }
 
         // Ask nicely first: TopBar's Closing handler calls Reset(), which
